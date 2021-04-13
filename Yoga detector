@@ -1,0 +1,278 @@
+import sys
+import cv2
+import os
+from sys import platform
+import argparse
+import time
+import numpy as np
+from keras.models import load_model
+import json
+
+
+
+
+def scale_transform(coords):
+    """
+    Parameters:
+    coords (25x3 ndarray): array of (x,y,c) coordinates
+
+    Returns:
+    ndarray: coords scaled to 1x1 with center at (0,0)
+    ndarray: confidence scores of each joint
+    """
+    coords, scores = coords[:, :, :-1], coords[:, :, -1]
+    diff = coords.max(axis=1) - coords.min(axis=1)
+    diff_max = np.max(diff, axis=0)
+    mean = coords.mean(axis=1).reshape(
+                coords.shape[0],
+                1,
+                coords.shape[-1]
+    )
+    out = (coords - mean) / diff_max
+
+    return out, scores
+
+
+def make_vector(poseKeypoints):
+    """
+    Parameters:
+    poseKeypoints (ndarray): Single person output from OpenPose
+
+    Returns:
+    ndarray: scaled, transformed, normalized row vector
+    """
+    N, D, C = poseKeypoints.shape
+    coords, pose_scores = scale_transform(poseKeypoints)
+    pose_scores = pose_scores.reshape((N, D, 1))
+    coords_vec = np.concatenate([coords, pose_scores], axis=2)
+    coords_vec /= np.linalg.norm(coords_vec, axis=2)[:, :, np.newaxis]
+
+    return coords_vec
+
+
+def get_ordinal_score(score):
+    """
+    Parameters:
+    score (float): similarity score between two poses
+                   between 0 and 1
+
+    Returns:
+    string: string text of the results
+    float: transparency value
+    tuple: color of overlay
+    """
+    alpha = 0.2
+    overlay_color = (0, 0, 255)
+
+    if score >= 0.7:
+        out = "Master!"
+    elif score >= 0.6:
+        out = "Great!"
+    elif score >= 0.5:
+        out = "Nice try!"
+    elif score >= 0.3:
+        out = "Attention please"
+    else:
+        out = "Bad!"
+
+    return out, alpha, overlay_color
+
+
+try:
+    # Import Openpose (Windows/Ubuntu/OSX)
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    try:
+        # Windows Import
+        if platform == "win32":
+            # Change these variables to point to the correct folder (Release/x64 etc.)
+            sys.path.append(dir_path + '/../../python/openpose/Release');
+            os.environ['PATH']  = os.environ['PATH'] + ';' + dir_path + '/../../x64/Release;' +  dir_path + '/../../bin;'
+            import pyopenpose as op
+        else:
+            # Change these variables to point to the correct folder (Release/x64 etc.)
+            sys.path.append('/usr/local/lib/python3.8/site-packages');
+            # If you run `make install` (default path is `/usr/local/python` for Ubuntu), you can also access the OpenPose/python module from there. This will install OpenPose and the python library at your desired installation path. Ensure that this is in your python path in order to use it.
+            # sys.path.append('/usr/local/python')
+            import pyopenpose as op
+    except ImportError as e:
+        print('Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
+        raise e
+
+    # Flags
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image_dir", default="/Users/Ginny/openpose//examples/media/", help="Process a directory of images. Read all standard formats (jpg, png, bmp, etc.).")
+    parser.add_argument("--no_display", default=False, help="Enable to disable the visual display.")
+    args = parser.parse_known_args()
+
+    # Custom Params (refer to include/openpose/flags.hpp for more parameters)
+    params = dict()
+    params["model_folder"] = "/Users/Ginny/openpose/models/"
+    params["write_json"] = "/Users/Ginny/openpose/json/"
+    params["part_candidates"] = True
+    
+
+
+
+
+    # Add others in path?
+    for i in range(0, len(args[1])):
+        curr_item = args[1][i]
+        if i != len(args[1])-1: next_item = args[1][i+1]
+        else: next_item = "1"
+        if "--" in curr_item and "--" in next_item:
+            key = curr_item.replace('-','')
+            if key not in params:  params[key] = "1"
+        elif "--" in curr_item and "--" not in next_item:
+            key = curr_item.replace('-','')
+            if key not in params: params[key] = next_item
+
+    # Construct it from system arguments
+    # op.init_argv(args[1])
+    # oppython = op.OpenposePython()
+
+    # Starting OpenPose
+    opWrapper = op.WrapperPython()
+    opWrapper.configure(params)
+    opWrapper.start()
+
+    # Read frames on directory
+    imagePaths = op.get_images_on_directory(args[0].image_dir);
+
+    start = time.time()
+    com_model = load_model('/Users/Ginny/CV-pose-detection/ComparatorNet.h5')
+    
+
+    
+    # Process and teacher images
+    teacher = op.Datum()
+    teacher_img = cv2.imread("/Users/Ginny/CV-pose-detection/teacher/Alan.jpeg")
+    teacher.cvInputData = teacher_img
+    teacher.name="teacher"
+    opWrapper.emplaceAndPop([teacher])
+    teacher_Outimage = cv2.putText(teacher.cvOutputData, 'Teacher', (10,100), cv2.FONT_HERSHEY_COMPLEX, 3, (0, 255, 0), 2)
+    print("Body keypoints: \n" + str(teacher.poseKeypoints))
+    
+    # read teacher keypoints
+    with open('/Users/Ginny/openpose/json/teacher_keypoints.json') as f:
+     tk_data = json.load(f)
+    tk_item = tk_data['part_candidates'][0]
+ 
+   
+
+
+    # Process and display images
+    a = 1
+    
+    for imagePath in imagePaths:
+        datum = op.Datum()
+        imageToProcess = cv2.imread(imagePath)
+        datum.cvInputData = imageToProcess
+        datum.name= str(a)
+        opWrapper.emplaceAndPop([datum])
+
+        print("Body keypoints: \n" + str(datum.poseKeypoints))
+        
+ 
+        
+    # read student keypoints
+        with open('/Users/Ginny/openpose/json/' + str(a) + '_keypoints.json') as f:
+         can_data = json.load(f)
+        can_item = can_data['part_candidates'][0]
+        # Array
+        All_in_one=[]
+        # for X
+        tk_x = []
+        can_x = []
+        
+        for key,value in tk_item.items(): 
+            if key != '17':
+                tk_x.append(value[0])
+                print("TK(X"+key+"):",value[0])
+                
+        for key,value in can_item.items():      
+            if key != '17':
+                 can_x.append(value[0])
+                 print("CAN(X"+key+"):",value[0])
+                 
+        for no_x in range(len(tk_item)-1):
+            diff_tk_can_x = tk_x[no_x] - can_x[no_x]
+            # print("X: ", diff_tk_can_x)
+            All_in_one.append(diff_tk_can_x)
+# ------------------------------------------------------------------------------
+        # for Y
+        tk_y = []
+        can_y = []
+        
+        for key,value in tk_item.items(): 
+            if key != '17':
+                tk_y.append(value[0])
+                print("TK(Y"+key+"):",value[0])
+                
+        for key,value in can_item.items():      
+            if key != '17':
+                 can_y.append(value[0])
+                 print("CAN(Y"+key+"):",value[0])
+                 
+        for no_y in range(len(tk_item)-1):
+            diff_tk_can_y = tk_y[no_y] - can_y[no_y]
+            # print("Y: ", diff_tk_can_xy)
+            All_in_one.append(diff_tk_can_y)
+#-------------------------------------------------------------------------
+        # Find Max abd Min
+        print(All_in_one)
+        print("Max: ", All_in_one.index(max(All_in_one)))
+        print("Min: ", All_in_one.index(min(All_in_one)))
+        # for key,value in can_item.items():       
+        #     if key != '17':
+        #         can_x.append(value[0])
+        #         print("CAN(X"+key+"):",value[0])
+        for key,value in can_item.items():  
+         if key == str(All_in_one.index(max(All_in_one))):
+          print("XY of {} Max: X: {}, Y: {}, Z: {}".format(key,value[0],value[1],value[2]))
+          student_Outimage = cv2.circle(datum.cvOutputData, (int(value[0]),int(value[1])), 30, (0, 0, 255),3)
+
+            
+        for key,value in can_item.items(): 
+         if key == str(All_in_one.index(min(All_in_one))):
+          print("XY of {} Min: X: {}, Y: {}, Z: {}".format(key,value[0],value[1],value[2]))
+        
+        
+        #check if Openpose managed image
+        ordinal_score = ('', 0.0, (0, 0, 0))
+        if type(datum.poseKeypoints) == np.ndarray and \
+            datum.poseKeypoints.shape == (1, 25, 3):
+                
+                if type(teacher.poseKeypoints) == np.ndarray or \
+                    teacher.poseKeypoints.shape == (1, 23, 3):
+                        
+                        # Scale, transform, normalize, reshape, predict
+                        coords_vec = make_vector(datum.poseKeypoints)
+                        teacher_coords_vec = make_vector(teacher.poseKeypoints)
+                        input_vec = np.concatenate([coords_vec, teacher_coords_vec]).flatten()
+                        similarity_score = com_model.predict(input_vec.reshape((1, -1)))
+                        ordinal_score = get_ordinal_score(similarity_score)
+                        
+
+        if not args[0].no_display:
+            combined = cv2.hconcat([student_Outimage,teacher_Outimage])
+            cv2.rectangle(combined, (10, 30), (600, 120), (255, 255, 255), 3)
+            font = cv2.FONT_HERSHEY_DUPLEX
+            cv2.putText(combined, ' ' + ordinal_score[0], (10, 100), font, 2, (0, 0, 255), 4, cv2.LINE_AA)
+            cv2.imwrite("/Users/Ginny/openpose/out/" + str(a) + ".jpg", combined)
+            print("Saved")
+            
+            
+            a = a+1
+            key = cv2.waitKey(15)
+            if key == 27: break
+
+    end = time.time()
+    print("OpenPose demo successfully finished. Total time: " + str(end - start) + " seconds")
+    
+
+
+    
+    
+except Exception as e:
+    print(e)
+    sys.exit(-1)
